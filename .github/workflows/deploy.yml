@@ -202,39 +202,41 @@ jobs:
             exit 1
           fi
 
-          # Transfer Docker image with progress and timeout
+          # Transfer Docker image with optimized speed settings
           echo "Transferring Docker image..."
           IMAGE_SIZE=$(du -h /tmp/${{ needs.build.outputs.image_file }} | cut -f1)
           echo "Image size: $IMAGE_SIZE"
           
+          # Use fastest cipher for maximum transfer speed (arcfour/rc4 is fastest but less secure)
+          # For Docker images (binary data), disable compression to save CPU
           if [ -n "${{ secrets.KEY }}" ]; then
-            timeout 900 rsync -avz --progress --partial --timeout=300 -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+            timeout 900 rsync -av --progress --partial --timeout=300 -e "ssh -i ~/.ssh/id_rsa -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o Compression=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
           else
-            timeout 900 sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --progress --partial --timeout=300 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+            timeout 900 sshpass -p '${{ secrets.PASSWORD }}' rsync -av --progress --partial --timeout=300 -e "ssh -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o Compression=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
           fi
           
           if [ $? -ne 0 ]; then
-            echo "Image transfer failed or timed out. Retrying with compression..."
+            echo "Image transfer failed or timed out. Retrying with fallback cipher..."
             if [ -n "${{ secrets.KEY }}" ]; then
-              timeout 900 rsync -avz --progress --partial --compress-level=1 --timeout=300 -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+              timeout 900 rsync -av --progress --partial --timeout=300 -e "ssh -i ~/.ssh/id_rsa -c aes128-cbc -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o Compression=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
             else
-              timeout 900 sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --progress --partial --compress-level=1 --timeout=300 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+              timeout 900 sshpass -p '${{ secrets.PASSWORD }}' rsync -av --progress --partial --timeout=300 -e "ssh -c aes128-cbc -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o Compression=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
             fi
           fi
 
-          # Transfer compose files and configs
+          # Transfer compose files and configs (text files can benefit from compression)
           echo "Transferring compose files..."
           if [ -n "${{ secrets.KEY }}" ]; then
-            rsync -avz --timeout=60 -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
+            rsync -avz --timeout=60 -e "ssh -i ~/.ssh/id_rsa -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
           else
-            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --timeout=60 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
+            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --timeout=60 -e "ssh -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
           fi
 
           echo "Transferring nginx directory..."
           if [ -n "${{ secrets.KEY }}" ]; then
-            rsync -avz --timeout=60 -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
+            rsync -avz --timeout=60 -e "ssh -i ~/.ssh/id_rsa -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
           else
-            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --timeout=60 -e "ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
+            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz --timeout=60 -e "ssh -c aes128-ctr -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
           fi
 
           echo "File transfer completed successfully"
