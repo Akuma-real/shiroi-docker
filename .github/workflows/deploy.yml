@@ -150,20 +150,23 @@ jobs:
           ls -la /tmp
           echo "Looking for image file: /tmp/${{ needs.build.outputs.image_file }}"
 
-      - name: Copy Docker image and compose files via rsync
+      - name: Create directories on remote server
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ secrets.KEY }}
+          password: ${{ secrets.PASSWORD }}
           port: ${{ secrets.PORT }}
           script: |
-            # Ensure target directory exists
+            # Ensure target directories exist
             mkdir -p /tmp/shiroi
             mkdir -p $HOME/shiroi/deploy
+            mkdir -p $HOME/shiroi/deploy/nginx
+            mkdir -p $HOME/shiroi/data
+            mkdir -p $HOME/shiroi/logs
 
             # Clean up any incorrectly created directories from previous failed deployments
-            mkdir -p $HOME/shiroi/deploy/nginx
             if [ -d "$HOME/shiroi/deploy/nginx/nginx.conf" ]; then
               echo "Removing incorrectly created nginx.conf directory..."
               rm -rf "$HOME/shiroi/deploy/nginx/nginx.conf"
@@ -172,33 +175,57 @@ jobs:
               echo "Removing incorrectly created upstream.conf directory..."
               rm -rf "$HOME/shiroi/deploy/nginx/upstream.conf"
             fi
+            
+            echo "Directories created successfully"
 
       - name: Transfer Docker image and deployment files
         run: |
-          # Setup SSH key
+          # Setup SSH authentication
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -p ${{ secrets.PORT || 22 }} ${{ secrets.HOST }} >> ~/.ssh/known_hosts
 
+          # Determine authentication method
+          if [ -n "${{ secrets.KEY }}" ]; then
+            echo "Using SSH key authentication"
+            echo "${{ secrets.KEY }}" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            SSH_CMD="ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}"
+            RSYNC_SSH="-e '$SSH_CMD'"
+          elif [ -n "${{ secrets.PASSWORD }}" ]; then
+            echo "Using password authentication"
+            sudo apt-get update && sudo apt-get install -y sshpass
+            SSH_CMD="sshpass -p '${{ secrets.PASSWORD }}' ssh -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}"
+            RSYNC_SSH="-e 'ssh -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}'"
+            RSYNC_PREFIX="sshpass -p '${{ secrets.PASSWORD }}'"
+          else
+            echo "Error: Neither SSH key nor password provided"
+            exit 1
+          fi
+
           # Transfer Docker image
-          TRANSFER_CMD="rsync -avz -e 'ssh -i ~/.ssh/id_rsa -p ${{ secrets.PORT || 22 }}' /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/"
           echo "Transferring Docker image..."
-          eval $TRANSFER_CMD
+          if [ -n "${{ secrets.KEY }}" ]; then
+            rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+          else
+            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" /tmp/${{ needs.build.outputs.image_file }} ${{ secrets.USER }}@${{ secrets.HOST }}:/tmp/shiroi/
+          fi
 
           # Transfer compose files and configs
           echo "Transferring compose files..."
-          rsync -avz -e 'ssh -i ~/.ssh/id_rsa -p ${{ secrets.PORT || 22 }}' docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:/home/${{ secrets.USER }}/shiroi/deploy/
+          if [ -n "${{ secrets.KEY }}" ]; then
+            rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
+          else
+            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" docker-compose.yml deploy-zero-downtime.sh first-time-deploy.sh sync-configs.sh shiroi.env.example compose.env.example ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/
+          fi
 
           echo "Transferring nginx directory..."
-          rsync -avz -e 'ssh -i ~/.ssh/id_rsa -p ${{ secrets.PORT || 22 }}' nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:/home/${{ secrets.USER }}/shiroi/deploy/nginx/
-
-          if [ $? -eq 0 ]; then
-            echo "File transfer completed successfully"
+          if [ -n "${{ secrets.KEY }}" ]; then
+            rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
           else
-            echo "File transfer failed"
-            exit 1
+            sshpass -p '${{ secrets.PASSWORD }}' rsync -avz -e "ssh -o StrictHostKeyChecking=no -p ${{ secrets.PORT || 22 }}" nginx/ ${{ secrets.USER }}@${{ secrets.HOST }}:shiroi/deploy/nginx/
           fi
+
+          echo "File transfer completed successfully"
 
       - name: Deploy Docker container with zero downtime
         uses: appleboy/ssh-action@master
@@ -206,7 +233,8 @@ jobs:
           command_timeout: 15m
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ secrets.KEY }}
+          password: ${{ secrets.PASSWORD }}
           port: ${{ secrets.PORT }}
           script: |
             set -e
@@ -271,25 +299,25 @@ jobs:
             echo "Current tags preserved: latest, $SHA_SHORT, $DATE_TAG"
 
             # 获取所有标签，排除系统标签和当前构建的标签
-            ALL_TAGS=$(docker images $IMAGE_NAME --format "{{.Tag}}" | grep -v "TAG" | grep -v "latest" | grep -v "$SHA_SHORT" | grep -v "$DATE_TAG" | grep -v "<none>")
+            ALL_TAGS=$(docker images $IMAGE_NAME --format "{{.Tag}}" 2>/dev/null | grep -v "TAG" | grep -v "latest" | grep -v "$SHA_SHORT" | grep -v "$DATE_TAG" | grep -v "<none>" || true)
 
             # 按时间排序，获取需要删除的旧版本（保留最新的 KEEP_VERSIONS 个版本）
-            if [ ! -z "$ALL_TAGS" ]; then
+            if [ ! -z "$ALL_TAGS" ] && [ "$ALL_TAGS" != "" ]; then
               # 使用 git commit hash 格式的标签进行版本管理（7 个字符的 hash）
-              HASH_TAGS=$(echo "$ALL_TAGS" | grep -E '^[a-f0-9]{7}$' | sort -r)
-              DATE_TAGS=$(echo "$ALL_TAGS" | grep -E '^[0-9]{8}_[0-9]{4}$' | sort -r)
+              HASH_TAGS=$(echo "$ALL_TAGS" | grep -E '^[a-f0-9]{7}$' | sort -r || true)
+              DATE_TAGS=$(echo "$ALL_TAGS" | grep -E '^[0-9]{8}_[0-9]{4}$' | sort -r || true)
               
               # 清理旧的 hash 标签
-              OLD_HASH_TAGS=$(echo "$HASH_TAGS" | tail -n +$((KEEP_VERSIONS + 1)))
+              OLD_HASH_TAGS=$(echo "$HASH_TAGS" | tail -n +$((KEEP_VERSIONS + 1)) 2>/dev/null || true)
               # 清理旧的日期标签  
-              OLD_DATE_TAGS=$(echo "$DATE_TAGS" | tail -n +$((KEEP_VERSIONS + 1)))
+              OLD_DATE_TAGS=$(echo "$DATE_TAGS" | tail -n +$((KEEP_VERSIONS + 1)) 2>/dev/null || true)
               
               OLD_TAGS="$OLD_HASH_TAGS $OLD_DATE_TAGS"
-              OLD_TAGS=$(echo "$OLD_TAGS" | tr ' ' '\n' | grep -v '^$' | sort -u)
+              OLD_TAGS=$(echo "$OLD_TAGS" | tr ' ' '\n' | grep -v '^$' | sort -u 2>/dev/null || true)
               
-              if [ ! -z "$OLD_TAGS" ]; then
+              if [ ! -z "$OLD_TAGS" ] && [ "$OLD_TAGS" != "" ]; then
                 echo "Removing old image tags: $OLD_TAGS"
-                echo "$OLD_TAGS" | xargs -r -I {} docker rmi ${IMAGE_NAME}:{} || true
+                echo "$OLD_TAGS" | xargs -r -I {} docker rmi ${IMAGE_NAME}:{} 2>/dev/null || true
                 echo "Image cleanup completed"
               else
                 echo "No old images to clean up (keeping latest $KEEP_VERSIONS versions for rollback)"
